@@ -26,9 +26,9 @@ pip install ga_scheduler
 
 - Job Shop Machines Scheduling - Brute Force ( [ Colab Demo ](https://colab.research.google.com/drive/1MCo3msB8cVbjg-fT9FV5QBmTKFM6km3a?usp=sharing)) 
 - Job Shop Machines Scheduling - Genetic Algorithm ( [ Colab Demo ](https://colab.research.google.com/drive/1etJc3z0JMVx4FQBLZCZbCgtQsyt1pjQJ?usp=sharing)) 
-
+<!-- -->
 - Flow Shop Machines Scheduling - Brute Force ( [ Colab Demo ](https://colab.research.google.com/drive/1Fiq5JB9jNXjc_HSDUhEWvujILse2QdfD?usp=sharing)) 
 - Flow Shop Machines Scheduling - Genetic Algorithm ( [ Colab Demo ](https://colab.research.google.com/drive/1CqcoXxyBypo_maEE7_-55s64_dsnJ42w?usp=sharing))
- 
+ <!-- -->
 - Parallel Machines Scheduling - Brute Force ( [ Colab Demo ](https://colab.research.google.com/drive/1qQmvkkNliPAVlTk2ShvM0Di9JAKzkqmL?usp=sharing)) 
 - Parallel Machines Scheduling - Genetic Algorithm ( [ Colab Demo ](https://colab.research.google.com/drive/1yyfWNei8JNWpsOuy3UBB-pm0MIW5uxQO?usp=sharing)) 
