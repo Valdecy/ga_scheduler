@@ -19,17 +19,19 @@ plt.style.use('ggplot')
 import numpy as np
 import random
 
-from ga_scheduler.util.ga import genetic_algorithm
+from ga_scheduler.util.ga    import genetic_algorithm
+from ga_scheduler.util.ecmoa import elitist_combinatorial_multiobjective_optimization_algorithm, selection_leaders
 
 ############################################################################
 
 # GA Scheduler Class
 class load_ga_scheduler():
-    def __init__(self, sequences = [], due_dates = [], setup_time_matrix = [], setup_waste_matrix = [], z_permutations = 100, job_weights = [], obj_makespan = True, obj_max_w_tardiness = True, obj_total_waste = True, obj_setup = True, w_obj_makespan = 1, w_obj_max_w_tardiness = 1, w_obj_total_waste = 1, w_obj_setup = 1, parallel_machines = False, brute_force = False, custom_sequence = []): 
+    def __init__(self, sequences = [], due_dates = [], setup_time_matrix = [], setup_waste_matrix = [], z_permutations = 100, job_weights = [], obj_makespan = True, obj_max_w_tardiness = True, obj_total_waste = True, obj_setup = True, w_obj_makespan = 1, w_obj_max_w_tardiness = 1, w_obj_total_waste = 1, w_obj_setup = 1, parallel_machines = False, brute_force = False, pareto_front = False, custom_sequence = []): 
       self.obj_1                          = obj_makespan
       self.obj_2                          = obj_max_w_tardiness
       self.obj_3                          = obj_total_waste
       self.obj_4                          = obj_setup
+      self.lst_func                       = []
       self.z_std                          = []
       self.z_permutations                 = z_permutations
       self.sequences                      = sequences                  # Job Shop Scheduling Input: Mandatory
@@ -39,6 +41,7 @@ class load_ga_scheduler():
       self.parallel                       = parallel_machines
       self.brute_force                    = brute_force
       self.custom_sequence                = custom_sequence
+      self.ecmo                           = pareto_front
       self.machine_sequences, self.matrix = self.sequence_inputs()
       self.num_jobs                       = len(self.sequences)
       self.num_machines                   = self.matrix.shape[1]
@@ -66,6 +69,7 @@ class load_ga_scheduler():
         self.z_mean, self.z_std = [0, 0, 0, 0], [1, 1, 1, 1]
       else:
         self.z_mean, self.z_std = self.obj_z_search()
+      self.objective_functions()
     ###############################################################################   
     
     # Create Instances
@@ -222,8 +226,35 @@ class load_ga_scheduler():
                     makespan = max(makespan, time + 1)
                     break
         return makespan
+
+    def calculate_makespan_p(self, permutation):
+        schedule_matrix = self.schedule_jobs(permutation)
+        total_length    = schedule_matrix.shape[1]
+        makespan        = 0
+        for machine in range(0, self.num_machines):
+            for time in range(total_length - 1, -1, -1):
+                if (schedule_matrix[machine][time] != ''):
+                    makespan = max(makespan, time + 1)
+                    break
+        return makespan
     
     def calculate_max_weighted_tardiness(self, schedule_matrix):
+        completion_times = {f'j{job}': 0 for job in range(0, self.num_jobs)}
+        total_length     = schedule_matrix.shape[1]
+        for machine in range(0, self.num_machines):
+            for time in range(0, total_length):
+                job = schedule_matrix[machine][time]
+                if (job):
+                    completion_times[job] = time + 1
+        max_weighted_tardiness = 0
+        for job in range(0, self.num_jobs):
+            tardiness              = max(0, completion_times[f'j{job}'] - self.due_dates[job])
+            weighted_tardiness     = self.job_weights[job] * tardiness
+            max_weighted_tardiness = max(max_weighted_tardiness, weighted_tardiness)
+        return max_weighted_tardiness
+
+    def calculate_max_weighted_tardiness_p(self, permutation):
+        schedule_matrix  = self.schedule_jobs(permutation)
         completion_times = {f'j{job}': 0 for job in range(0, self.num_jobs)}
         total_length     = schedule_matrix.shape[1]
         for machine in range(0, self.num_machines):
@@ -308,6 +339,29 @@ class load_ga_scheduler():
         print(f"Best Sequence: {best_sequence}; Obj. Function: {minimal_objective_value:.4f}")
         self.best_sequence = best_sequence
         return best_sequence, minimal_objective_value
+    
+    def brute_force_search_p(self):
+        merged                  = [] 
+        job_ids                 = list(range(0, len(self.sequences)))
+        count                   = 1
+        total                   = math.factorial(len(job_ids))
+        print('')
+        print('Verifying', total, 'solutions')
+        print('')
+        for permutation in itertools.permutations(job_ids):
+            m             = []
+            p             = [item for item in permutation]
+            m.append(p)
+            for k in range(0, len(self.lst_func)):
+                m.append(self.lst_func[k](p))
+            merged.append(m)
+            count         = count + 1
+            searched_perc = round(count / total * 100, 4)
+            if (count % (int(total/10)) == 0 or count == total):
+                print(f"Searched Space: {searched_perc:.2f}%")
+        print('Brute Force Search Complete!')
+        leaders = selection_leaders(total, len(self.lst_func), merged)
+        return leaders
     
     def obj_z_search(self):
         
@@ -395,31 +449,38 @@ class load_ga_scheduler():
         return objective_value
     
     def objective_functions(self):
-        lst = []
         if (self.obj_1 == True):
-            lst.append(self.calculate_makespan)
+            self.lst_func.append(self.calculate_makespan_p)
         if (self.obj_2 == True):
-            lst.append(self.calculate_max_weighted_tardiness)
+            self.lst_func.append(self.calculate_max_weighted_tardiness_p)
         if (self.obj_3 == True): 
-            lst.append(self.calculate_total_waste) 
+            self.lst_func.append(self.calculate_total_waste) 
         if (self.obj_4 == True):
-            lst.append(self.calculate_total_setup_time)
-        return lst
+            self.lst_func.append(self.calculate_total_setup_time)
+        return 
     
     ###############################################################################
     
     # GA Scheduler
-    def run_ga_scheduler(self, population_size = 5, elite = 1, mutation_rate = 0.10, generations = 100):
-        if (self.brute_force == False and len(self.custom_sequence) == 0):
+    def run_ga_scheduler(self, population_size = 5, elite = 1, mutation_rate = 0.10, generations = 100, k = 4):
+        if (self.brute_force == False and len(self.custom_sequence) == 0 and self.ecmo == False):
             job_sequence, obj_fun = genetic_algorithm(self.num_jobs, population_size, elite, mutation_rate, generations, self.target_function, True)
             schedule_matrix       = self.schedule_jobs(job_sequence) 
-        if (self.brute_force == True and len(self.custom_sequence) == 0):
+            return job_sequence, schedule_matrix, obj_fun
+        elif (self.brute_force == False and len(self.custom_sequence) == 0 and self.ecmo == True):
+            leaders = elitist_combinatorial_multiobjective_optimization_algorithm(population_size, self.num_jobs, self.lst_func, generations, k, True)
+            return leaders
+        if (self.brute_force == True and len(self.custom_sequence) == 0 and self.ecmo == False):
             job_sequence, obj_fun = self.brute_force_search()
             schedule_matrix       = self.schedule_jobs(job_sequence)
+            return job_sequence, schedule_matrix, obj_fun
+        elif (self.brute_force == True and len(self.custom_sequence) == 0 and self.ecmo == True):
+            leaders = self.brute_force_search_p()
+            return leaders
         if (len(self.custom_sequence) != 0):
             job_sequence    = self.custom_sequence
             schedule_matrix = self.schedule_jobs(job_sequence) 
             obj_fun         = self.target_function(self.custom_sequence)
-        return job_sequence, schedule_matrix, obj_fun
+            return job_sequence, schedule_matrix, obj_fun
     
 ############################################################################
