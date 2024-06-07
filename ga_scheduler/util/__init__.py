@@ -1,1 +1,2 @@
-from .ga import *
+from .ga    import *
+from .ecmoa import *
