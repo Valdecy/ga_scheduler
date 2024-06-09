@@ -2,12 +2,12 @@
 
 ## Overview
 
-GA Scheduler is an advanced scheduling tool that leverages genetic algorithms to optimize **single**, **parallel**, **flow shop**, and **job shop** machines scheduling problems. Multiple objectives can be addressed such as makespan, weighted tardiness, total waste changeover between jobs, and total setup times changeover between jobs. Additionally, the library provides a comprehensive way to visualize scheduling results through Gantt charts.
+GA Scheduler is an advanced scheduling tool that leverages genetic algorithms to optimize **single**, **parallel**, **flow shop**, and **job shop** machines scheduling problems. Multiple objectives can be addressed such as makespan, weighted tardiness, total waste changeover between jobs, total setup times changeover between jobs, total completion time and total of late jobs. Additionally, the library provides a comprehensive way to visualize scheduling results through Gantt charts.
 
 ## Features
 
 - **Scheduling Machine Environments**: Supports single machine, parallel machines, flow shop, and job shop scheduling problems.
-- **Multi-Objective Optimization**: Supports optimization for multiple objectives including makespan, weighted tardiness, total waste changeover between jobs, and setup times changeover between jobs.
+- **Multi-Objective Optimization**: Supports optimization for multiple objectives including makespan, weighted tardiness, total waste changeover between jobs, setup times changeover between jobs, total completion time and total of late jobs.
 - **Genetic Algorithm Integration**: Utilizes a GA to efficiently explore the solution space and find optimal or near-optimal job sequences.
 - **Many or Multiobjective Algorithm Integration**: Alternatively, the multiobjective problem can be solved using the ECMOA (Elitist Combinatorial Multiobjective Optimization Algorithm), which returns the Pareto Front as the solution.
 - **Brute Force**: For small problem instances, the brute force search can be used to find the optimal job sequence.
