@@ -26,11 +26,13 @@ from ga_scheduler.util.ecmoa import elitist_combinatorial_multiobjective_optimiz
 
 # GA Scheduler Class
 class load_ga_scheduler():
-    def __init__(self, sequences = [], due_dates = [], setup_time_matrix = [], setup_waste_matrix = [], z_permutations = 100, job_weights = [], obj_makespan = True, obj_max_w_tardiness = True, obj_total_waste = True, obj_setup = True, w_obj_makespan = 1, w_obj_max_w_tardiness = 1, w_obj_total_waste = 1, w_obj_setup = 1, parallel_machines = False, brute_force = False, pareto_front = False, custom_sequence = []): 
+    def __init__(self, sequences = [], due_dates = [], setup_time_matrix = [], setup_waste_matrix = [], z_permutations = 100, job_weights = [], obj_makespan = True, obj_total_compl_time = True, obj_total_late_jobs = True, obj_max_w_tardiness = True, obj_total_waste = True, obj_setup = True, w_obj_makespan = 1, w_obj_total_compl_time = 1, w_obj_total_late_jobs = 1, w_obj_max_w_tardiness = 1, w_obj_total_waste = 1, w_obj_setup = 1, parallel_machines = False, brute_force = False, pareto_front = False, custom_sequence = []): 
       self.obj_1                          = obj_makespan
       self.obj_2                          = obj_max_w_tardiness
       self.obj_3                          = obj_total_waste
       self.obj_4                          = obj_setup
+      self.obj_5                          = obj_total_compl_time
+      self.obj_6                          = obj_total_late_jobs
       self.lst_func                       = []
       self.z_std                          = []
       self.z_permutations                 = z_permutations
@@ -46,7 +48,7 @@ class load_ga_scheduler():
       self.num_jobs                       = len(self.sequences)
       self.num_machines                   = self.matrix.shape[1]
       self.job_weights                    = [1 for i in range(0, self.num_jobs)]
-      self.objectives_weights             = [1, 1, 1, 1] 
+      self.objectives_weights             = [1, 1, 1, 1, 1, 1] 
       for i in range(0, min(len(job_weights), self.num_jobs)):
           self.job_weights[i] = job_weights[i] 
       if (self.obj_1 == True):
@@ -65,8 +67,16 @@ class load_ga_scheduler():
           self.objectives_weights[3] = w_obj_setup
       else:
           self.objectives_weights[3] = 0
-      if (self.objectives_weights.count(0) == 3):
-        self.z_mean, self.z_std = [0, 0, 0, 0], [1, 1, 1, 1]
+      if (self.obj_5 == True):
+          self.objectives_weights[4] = w_obj_total_compl_time
+      else:
+          self.objectives_weights[4] = 0
+      if (self.obj_6 == True):
+          self.objectives_weights[5] = w_obj_total_late_jobs
+      else:
+          self.objectives_weights[5] = 0
+      if (self.objectives_weights.count(0) == len(self.objectives_weights) -1):
+        self.z_mean, self.z_std = [0]*len(self.objectives_weights), [1]*len(self.objectives_weights) 
       else:
         self.z_mean, self.z_std = self.obj_z_search()
       self.objective_functions()
@@ -80,7 +90,7 @@ class load_ga_scheduler():
             processed_lists = []
             for lst in lists:
                 if (pm):
-                    lst = sorted(lst, key=lambda x: x[0])
+                    lst = sorted(lst, key = lambda x: x[0])
                 if (tm):
                     first_tuple_second_element = lst[0][1]
                     lst = [(t[0], first_tuple_second_element) for t in lst]
@@ -268,6 +278,58 @@ class load_ga_scheduler():
             weighted_tardiness     = self.job_weights[job] * tardiness
             max_weighted_tardiness = max(max_weighted_tardiness, weighted_tardiness)
         return max_weighted_tardiness
+
+    def calculate_total_completion_time(self, schedule_matrix):
+        completion_times = {f'j{job}': 0 for job in range(0, self.num_jobs)}
+        total_length     = schedule_matrix.shape[1]
+        for machine in range(0, self.num_machines):
+            for time in range(0, total_length):
+                job = schedule_matrix[machine][time]
+                if (job):  
+                    completion_times[job] = time + 1  
+        total_completion_time = sum(completion_times[f'j{job}'] for job in range(0, self.num_jobs))
+        return total_completion_time  
+
+    def calculate_total_completion_time_p(self, permutation):
+        schedule_matrix  = self.schedule_jobs(permutation)
+        completion_times = {f'j{job}': 0 for job in range(0, self.num_jobs)}
+        total_length     = schedule_matrix.shape[1]
+        for machine in range(0, self.num_machines):
+            for time in range(0, total_length):
+                job = schedule_matrix[machine][time]
+                if (job):  
+                    completion_times[job] = time + 1  
+        total_completion_time = sum(completion_times[f'j{job}'] for job in range(0, self.num_jobs))
+        return total_completion_time  
+
+    def calculate_total_late_jobs(self, schedule_matrix):
+        completion_times = {f'j{job}': 0 for job in range(0, self.num_jobs)}
+        total_length     = schedule_matrix.shape[1]
+        for machine in range(0, self.num_machines):
+            for time in range(0, total_length):
+                job = schedule_matrix[machine][time]
+                if (job): 
+                    completion_times[job] = time + 1
+        total_late_jobs = 0
+        for job in range(0, self.num_jobs):
+            if (completion_times[f'j{job}'] > self.due_dates[job]):  
+                total_late_jobs = total_late_jobs + 1  
+        return total_late_jobs  
+    
+    def calculate_total_late_jobs_p(self, permutation):
+        schedule_matrix  = self.schedule_jobs(permutation)
+        completion_times = {f'j{job}': 0 for job in range(0, self.num_jobs)}
+        total_length     = schedule_matrix.shape[1]
+        for machine in range(0, self.num_machines):
+            for time in range(0, total_length):
+                job = schedule_matrix[machine][time]
+                if (job): 
+                    completion_times[job] = time + 1
+        total_late_jobs = 0
+        for job in range(0, self.num_jobs):
+            if (completion_times[f'j{job}'] > self.due_dates[job]):  
+                total_late_jobs = total_late_jobs + 1  
+        return total_late_jobs
     
     def calculate_total_waste(self, permutation):
         total_waste = 0
@@ -276,6 +338,23 @@ class load_ga_scheduler():
         return total_waste
 
     def calculate_idle_times(self, schedule_matrix):
+        total_idle_time = 0
+        for row in schedule_matrix:
+            row_idle_time  = 0
+            last_job_index = None
+            for i in range(len(row) - 1, -1, -1):
+                if (row[i] != ''):
+                    last_job_index = i
+                    break
+            if (last_job_index is not None):
+                for i in range(0, last_job_index):
+                    if (row[i] == ''):
+                        row_idle_time =  row_idle_time  + 1
+            total_idle_time = total_idle_time + row_idle_time
+        return total_idle_time
+    
+    def calculate_idle_times_p(self, permutation):
+        schedule_matrix = self.schedule_jobs(permutation)
         total_idle_time = 0
         for row in schedule_matrix:
             row_idle_time  = 0
@@ -341,16 +420,16 @@ class load_ga_scheduler():
         return best_sequence, minimal_objective_value
     
     def brute_force_search_p(self):
-        merged                  = [] 
-        job_ids                 = list(range(0, len(self.sequences)))
-        count                   = 1
-        total                   = math.factorial(len(job_ids))
+        merged  = [] 
+        job_ids = list(range(0, len(self.sequences)))
+        count   = 1
+        total   = math.factorial(len(job_ids))
         print('')
         print('Verifying', total, 'solutions')
         print('')
         for permutation in itertools.permutations(job_ids):
-            m             = []
-            p             = [item for item in permutation]
+            m = []
+            p = [item for item in permutation]
             m.append(p)
             for k in range(0, len(self.lst_func)):
                 m.append(self.lst_func[k](p))
@@ -381,6 +460,8 @@ class load_ga_scheduler():
         obj_2_lst            = []
         obj_3_lst            = []
         obj_4_lst            = []
+        obj_5_lst            = []
+        obj_6_lst            = []
         z_mean               = []
         z_std                = []
         for permutation in sampled_permutations:
@@ -397,6 +478,12 @@ class load_ga_scheduler():
             if (self.obj_4 == True):
                 total_setup_time = self.calculate_total_setup_time(permutation)
                 obj_4_lst.append(total_setup_time)
+            if (self.obj_5 == True):
+                total_compl_time = self.calculate_total_completion_time(schedule_matrix)
+                obj_5_lst.append(total_compl_time)
+            if (self.obj_6 == True):
+                total_late_jobs = self.calculate_total_late_jobs(schedule_matrix)
+                obj_6_lst.append(total_late_jobs)
         if (obj_1_lst):
             z_mean.append(np.mean(obj_1_lst))
             #z_std.append(np.std(obj_1_lst, ddof = 1) / np.sqrt(len(obj_1_lst)))
@@ -425,6 +512,20 @@ class load_ga_scheduler():
         else:
             z_mean.append(None)
             z_std.append(None)
+        if (obj_5_lst):
+            z_mean.append(np.mean(obj_5_lst))
+            #z_std.append(np.std(obj_5_lst, ddof = 1) / np.sqrt(len(obj_5_lst)))
+            z_std.append(np.std(obj_5_lst, ddof = 1))
+        else:
+            z_mean.append(None)
+            z_std.append(None)
+        if (obj_6_lst):
+            z_mean.append(np.mean(obj_6_lst))
+            #z_std.append(np.std(obj_6_lst, ddof = 1) / np.sqrt(len(obj_6_lst)))
+            z_std.append(np.std(obj_6_lst, ddof = 1))
+        else:
+            z_mean.append(None)
+            z_std.append(None)
         return z_mean, z_std
     
     def target_function(self, permutation): 
@@ -446,6 +547,14 @@ class load_ga_scheduler():
             total_setup_time         = self.calculate_total_setup_time(permutation)
             z_total_setup_time       = ( (total_setup_time - self.z_mean[3]) /  (self.z_std[3] + 1e-14) ) + 9
             objective_value          = objective_value + self.objectives_weights[3] * z_total_setup_time 
+        if (self.objectives_weights[4] != 0):
+            total_compl_time         = self.calculate_total_completion_time(schedule_matrix)
+            z_total_compl_time       = ( (total_compl_time - self.z_mean[4]) /  (self.z_std[4] + 1e-14) ) + 9
+            objective_value          = objective_value + self.objectives_weights[4] * z_total_compl_time 
+        if (self.objectives_weights[5] != 0):
+            total_late_jobs          = self.calculate_total_late_jobs(schedule_matrix)
+            z_total_late_jobs        = ( (total_late_jobs - self.z_mean[5]) /  (self.z_std[5] + 1e-14) ) + 9
+            objective_value          = objective_value + self.objectives_weights[5] * z_total_late_jobs 
         return objective_value
     
     def objective_functions(self):
@@ -457,6 +566,10 @@ class load_ga_scheduler():
             self.lst_func.append(self.calculate_total_waste) 
         if (self.obj_4 == True):
             self.lst_func.append(self.calculate_total_setup_time)
+        if (self.obj_5 == True):
+            self.lst_func.append(self.calculate_total_completion_time_p)
+        if (self.obj_6 == True):
+            self.lst_func.append(self.calculate_total_late_jobs_p)
         return 
     
     ###############################################################################
