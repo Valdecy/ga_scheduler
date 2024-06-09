@@ -29,7 +29,7 @@ def func_2():
 ############################################################################
 
 # Function: Initial Seed
-def seed_function(jobs, list_of_functions):
+def seed_function_ecmoa(jobs, list_of_functions):
     seed     = [[]] + [float("inf") for item in list_of_functions]
     sequence = random.sample((range(0, jobs)), jobs)
     seed[0]  = sequence
@@ -38,32 +38,60 @@ def seed_function(jobs, list_of_functions):
     return seed
 
 # Function: Initial Population
-def initial_population(population_size, jobs, list_of_functions):
+def initial_population_ecmoa(population_size, jobs, list_of_functions):
     population = []
     for i in range(0, population_size):
-        seed = seed_function(jobs, list_of_functions)
+        seed = seed_function_ecmoa(jobs, list_of_functions)
         population.append(seed)
     return population
 
 ############################################################################
 
+# Function: Crowding Distance (Adapted from PYMOO)
+def crowding_distance_function(population, M):
+    position = [ (item[1:]) for item in population]
+    position = np.asarray(position)/1.0
+    if (position.shape[0] <= 2):
+        return np.full( position.shape[0], float('+inf'))
+    else:
+        arg_1    = np.argsort( position, axis = 0, kind = 'mergesort')
+        position = position[arg_1, np.arange(M)]
+        dist     = np.concatenate([ position, np.full((1, M), np.inf)]) - np.concatenate([np.full((1, M), -np.inf), position])
+        idx      = np.where(dist == 0)
+        a        = np.copy(dist)
+        b        = np.copy(dist)
+        for i, j in zip(*idx):
+            a[i, j] = a[i - 1, j]
+        for i, j in reversed(list(zip(*idx))):
+            b[i, j] = b[i + 1, j]
+        norm            = np.max( position, axis = 0) - np.min(position, axis = 0)
+        norm[norm == 0] = np.nan
+        a, b            = a[:-1]/norm, b[1:]/norm
+        a[np.isnan(a)]  = 0.0
+        b[np.isnan(b)]  = 0.0
+        arg_2           = np.argsort(arg_1, axis = 0)
+        crowding        = np.sum(a[arg_2, np.arange(M)] + b[arg_2, np.arange(M)], axis = 1) / M
+    crowding[np.isinf(crowding)] = float('+inf')
+    crowding                     = crowding.reshape((-1,1))
+    return crowding
+
+############################################################################
+
+# Function: Unique individuals
+def ensure_unique_population(population):
+    unique_population = set()
+    for item in population:
+        unique_population.add(tuple(item[0])) 
+    unique_population_list = []
+    for unique_item in unique_population:
+        for original_item in population:
+            if (list(unique_item) == original_item[0]):
+                unique_population_list.append(original_item)
+                break  
+    return unique_population_list
+
 # Function: Leaders Selection
-def selection_leaders(size, M, population):
-    
-    ################################################
-    def ensure_unique_population(population):
-        unique_population = set()
-        for item in population:
-            unique_population.add(tuple(item[0])) 
-        unique_population_list = []
-        for unique_item in unique_population:
-            for original_item in population:
-                if (list(unique_item) == original_item[0]):
-                    unique_population_list.append(original_item)
-                    break  
-        return unique_population_list
-    ################################################
-    
+def selection_leaders(size, M, population):   
     position = [[] for item in population]
     for m in range(0, len(population)):
         for n in range(1, len(population[m])):
@@ -95,13 +123,17 @@ def crossover_tsp_bcr(parent_1, parent_2, list_of_functions):
         return [ (item, *[list_of_functions[k](item) for k in range(0, len(list_of_functions))]) for item in dist_list ]
     ################################################
    
-    p_1  = copy.deepcopy(parent_1)
-    p_2  = copy.deepcopy(parent_2)
-    M    = len(list_of_functions)
-    jobs = len(parent_1[0])
-    cut  = random.sample(list(range(0, len(p_1[0]))), int(len(p_1)/2))
-    cut  = [ p_1[0][i] for i in cut ]
-    best = []
+    p_1    = copy.deepcopy(parent_1)
+    p_2    = copy.deepcopy(parent_2)
+    ct     = random.randint(0, len(p_2[0]) - 1)
+    p_     = p_2[0][:ct + 1]  
+    p_0    = [x for x in p_1[0] if x not in p_]
+    p_2[0] = p_ + p_0
+    M      = len(list_of_functions)
+    jobs   = len(parent_1[0])
+    cut    = random.sample(list(range(0, len(p_1[0]))), int(len(p_1)/2))
+    cut    = [ p_1[0][i] for i in cut ]
+    best   = []
     for j in range(0, len(cut)):
         A         = cut[j]
         p_2[0].remove(A)
@@ -122,7 +154,7 @@ def crossover_tsp_bcr(parent_1, parent_2, list_of_functions):
     return ind
 
 # Function: Breeding
-def breeding(leaders, population, list_of_functions):
+def breeding_ecmoa(leaders, population, list_of_functions):
     offspring = [[] for item in population]
     parent_1  = 0
     parent_2  = 1
@@ -148,6 +180,23 @@ def breeding(leaders, population, list_of_functions):
         else:
             offspring[i] = crossover_tsp_bcr(parent_2, parent_1, list_of_functions)
     return offspring
+
+# Function: Mutation - Swap 
+def mutation_ecmoa_swap(population, list_of_functions):
+    p = copy.deepcopy(population)
+    q = []
+    for individual in p:
+        k                 = random.sample(list(range(0, len(individual[0]))), 2)
+        k1                = k[0]
+        k2                = k[1]  
+        A                 = individual[0][k1]
+        B                 = individual[0][k2]
+        individual[0][k1] = B
+        individual[0][k2] = A
+        for k in range (1, len(list_of_functions) + 1):
+            individual[-k] = list_of_functions[-k](individual[0])
+        q.append(individual)
+    return q
 
 ############################################################################
 
@@ -182,26 +231,32 @@ def pareto_front_points(pts, pf_min = True):
 
 ############################################################################
 
-# ECMO Function
+# ECMOA Function
 def elitist_combinatorial_multiobjective_optimization_algorithm(size = 15, jobs = 7, list_of_functions = [func_1, func_2], generations = 1500, k = 4, verbose = True):       
     count      = 0
     size       = max(5, size)
     M          = len(list_of_functions)
     k_size     = k*size
-    population = initial_population(k_size, jobs, list_of_functions)  
-    leaders    = selection_leaders(size, M, population)
+    population = initial_population_ecmoa(k_size, jobs, list_of_functions)  
+    leaders    = selection_leaders(k_size, M, population)
     print(' Population Size: ', int(k_size))
     while (count <= generations):       
         if (verbose == True):
             print('Generation = ', count)
-        offspring  = breeding(leaders, population, list_of_functions)
-        population = offspring + population
+        offspring  = breeding_ecmoa(leaders, population, list_of_functions)
+        mutants    = mutation_ecmoa_swap(population, list_of_functions)
+        population = population + offspring + mutants
+        population = ensure_unique_population(population)
         leaders    = selection_leaders(size, M, population)
-        rand       = int.from_bytes(os.urandom(8), byteorder = 'big') / ((1 << 64) - 1)  
-        if (rand > 0.95):
-            population = initial_population(k_size, jobs, list_of_functions) 
-        population = leaders + population
-        population = population[:k_size]
+        crowding   = crowding_distance_function(population, M)
+        arg        = np.argsort(crowding , axis = 0)[::-1].tolist()
+        try:
+            arg = [i[0] for i in arg ]
+        except:
+            arg = [i for i in arg ]
+        if (len(arg) > 0):
+            population = [ population[idx] for idx in arg]
+        population = population[:size]
         count      = count + 1              
     return leaders
 
