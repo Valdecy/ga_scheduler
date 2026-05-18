@@ -6,14 +6,14 @@ long_description = (this_directory / 'README.md').read_text()
 
 setup(
     name='ga_scheduler',
-    version='2.7.8',
+    version='2.8.0',
     license='GNU',
     author='Valdecy Pereira',
     author_email='valdecy.pereira@gmail.com',
     url='https://github.com/Valdecy/ga_scheduler',
     packages=find_packages(),
     install_requires=[
-        'matplotlib',
+        'plotly',
         'numpy'
     ],
     description='A Comprehensive Library for Solving Machine Scheduling Problems Using Genetic Algorithms',
