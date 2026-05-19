@@ -52,7 +52,8 @@ class load_ga_scheduler:
                  w_obj_makespan=1, w_obj_total_compl_time=1, w_obj_total_late_jobs=1,
                  w_obj_max_w_tardiness=1, w_obj_total_waste=1, w_obj_setup=1,
                  parallel_machines=False, brute_force=False, pareto_front=False,
-                 custom_sequence=None, operation_based_jssp=False):
+                 custom_sequence=None, operation_based_jssp=False,
+                 z_mean=None, z_std=None, z_seed=None):
         self.sequences = sequences or []
         if not self.sequences:
             raise ValueError('sequences must be a non-empty list of jobs, where each job is a list of (machine, processing_time) tuples.')
@@ -66,6 +67,12 @@ class load_ga_scheduler:
         self.pareto_front = bool(pareto_front)
         self.operation_based_jssp = bool(operation_based_jssp)
         self.z_permutations = int(z_permutations)
+
+        # Normalization of the scalarized objective uses random sampling when
+        # z_permutations < num_jobs!. Keep a local RNG so users can make the
+        # normalization reproducible without perturbing the GA operators.
+        self.z_seed = z_seed
+        self._z_rng = random.Random(z_seed) if z_seed is not None else random
 
         self.machine_sequences, self.matrix = self.sequence_inputs()
         self.operations = [[(int(m), int(t)) for m, t in job] for job in self.sequences]
@@ -105,7 +112,17 @@ class load_ga_scheduler:
             w_obj_total_late_jobs if self.obj_6 else 0,
         ]
         self.lst_func = []
-        self.z_mean, self.z_std = self.obj_z_search() if sum(w != 0 for w in self.objectives_weights) > 1 else ([0] * 6, [1] * 6)
+
+        if z_mean is not None or z_std is not None:
+            if z_mean is None or z_std is None:
+                raise ValueError('z_mean and z_std must be provided together.')
+            if len(z_mean) != 6 or len(z_std) != 6:
+                raise ValueError('z_mean and z_std must each contain six values.')
+            self.z_mean = [float(v) for v in z_mean]
+            self.z_std = [float(v) if float(v) != 0 else 1.0 for v in z_std]
+        else:
+            self.z_mean, self.z_std = self.obj_z_search() if sum(w != 0 for w in self.objectives_weights) > 1 else ([0] * 6, [1] * 6)
+
         self.objective_functions()
         self.best_sequence = None
         self.last_events = []
@@ -602,12 +619,14 @@ class load_ga_scheduler:
         return selection_leaders(total, len(self.lst_func), merged)
 
     def obj_z_search(self):
+        rng = self._z_rng
+
         def unique_permutations(job_ids, n_perm):
             if n_perm >= math.factorial(len(job_ids)):
                 return list(itertools.permutations(job_ids))
             seen = set()
             while len(seen) < n_perm:
-                seen.add(tuple(random.sample(job_ids, len(job_ids))))
+                seen.add(tuple(rng.sample(job_ids, len(job_ids))))
             return list(seen)
 
         if self.operation_based_jssp:
@@ -618,7 +637,7 @@ class load_ga_scheduler:
             attempts = 0
             while len(sampled) < target and attempts < target * 50:
                 attempts += 1
-                candidate = tuple(random.sample(base, len(base)))
+                candidate = tuple(rng.sample(base, len(base)))
                 if candidate not in seen:
                     seen.add(candidate)
                     sampled.append(candidate)
@@ -646,6 +665,18 @@ class load_ga_scheduler:
                 z_mean.append(0.0)
                 z_std.append(1.0)
         return z_mean, z_std
+
+    def get_normalization_stats(self):
+        """Return the z-score normalization statistics used by target_function."""
+        return list(self.z_mean), list(self.z_std)
+
+    def set_normalization_stats(self, z_mean, z_std):
+        """Set externally computed z-score normalization statistics."""
+        if len(z_mean) != 6 or len(z_std) != 6:
+            raise ValueError('z_mean and z_std must each contain six values.')
+        self.z_mean = [float(v) for v in z_mean]
+        self.z_std = [float(v) if float(v) != 0 else 1.0 for v in z_std]
+        return self
 
     def target_function(self, permutation):
         decoded = self._decode(permutation)
