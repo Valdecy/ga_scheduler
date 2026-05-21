@@ -26,6 +26,10 @@ _JOB_PALETTE = (
 )
 _SETUP_FILL = '#E5E7EB'
 _SETUP_LINE = '#9CA3AF'
+_MACHINE_SETUP_FILL = '#DBEAFE'
+_MACHINE_SETUP_LINE = '#60A5FA'
+_MAINTENANCE_FILL = '#FDE68A'
+_MAINTENANCE_LINE = '#D97706'
 _AXIS_COLOR = '#374151'
 _GRID_COLOR = '#E5E7EB'
 _BAR_BORDER = 'rgba(0,0,0,0.18)'
@@ -53,6 +57,7 @@ class load_ga_scheduler:
     """
 
     def __init__(self, sequences=None, flexible_sequences=None, due_dates=None, setup_time_matrix=None, setup_waste_matrix=None,
+                 machine_setup_time_matrix=None, machine_block_groups=None, machine_maintenance=None,
                  z_permutations=100, job_weights=None,
                  obj_makespan=True, obj_total_compl_time=True, obj_total_late_jobs=True,
                  obj_max_w_tardiness=True, obj_total_waste=True, obj_setup=True,
@@ -77,6 +82,7 @@ class load_ga_scheduler:
         self.due_dates = list(due_dates) if due_dates is not None else []
         self.setup_time_matrix = setup_time_matrix if setup_time_matrix is not None else []
         self.setup_waste_matrix = setup_waste_matrix if setup_waste_matrix is not None else []
+        self.machine_setup_time_matrix = machine_setup_time_matrix if machine_setup_time_matrix is not None else []
         self.parallel = bool(parallel_machines)
         self.brute_force = bool(brute_force)
         self.custom_sequence = copy.deepcopy(custom_sequence) if custom_sequence is not None else None
@@ -100,6 +106,9 @@ class load_ga_scheduler:
             self.num_machines = int(max(m for job in self.operations for m, _ in job) + 1)
         self.operation_counts = [len(job) for job in self.operations]
         self.operation_chromosome = [job_id for job_id, count in enumerate(self.operation_counts) for _ in range(count)]
+        self.machine_block_groups, self.machine_to_block_groups = self._normalize_machine_block_groups(machine_block_groups)
+        self.machine_maintenance = self._normalize_machine_maintenance(machine_maintenance)
+        self.last_maintenance_status = []
 
         self.job_weights = [1.0] * self.num_jobs
         for i, value in enumerate(job_weights or []):
@@ -110,7 +119,9 @@ class load_ga_scheduler:
         self.obj_1 = bool(obj_makespan)
         self.obj_2 = bool(obj_max_w_tardiness) and self._has_vector(self.due_dates, self.num_jobs)
         self.obj_3 = bool(obj_total_waste) and self._has_square_matrix(self.setup_waste_matrix, self.num_jobs)
-        self.obj_4 = bool(obj_setup) and self._has_square_matrix(self.setup_time_matrix, self.num_jobs)
+        self.obj_job_setup = bool(obj_setup) and self._has_square_matrix(self.setup_time_matrix, self.num_jobs)
+        self.obj_machine_setup = bool(obj_setup) and self._has_square_matrix(self.machine_setup_time_matrix, self.num_machines)
+        self.obj_4 = bool(obj_setup) and (self.obj_job_setup or self.obj_machine_setup)
         self.obj_5 = bool(obj_total_compl_time)
         self.obj_6 = bool(obj_total_late_jobs) and self._has_vector(self.due_dates, self.num_jobs)
 
@@ -120,8 +131,12 @@ class load_ga_scheduler:
             warnings.warn('obj_total_late_jobs disabled: due_dates must contain one value per job.', RuntimeWarning)
         if obj_total_waste and not self.obj_3:
             warnings.warn('obj_total_waste disabled: setup_waste_matrix must be a num_jobs x num_jobs matrix.', RuntimeWarning)
+        if obj_setup and setup_time_matrix is not None and not self.obj_job_setup:
+            warnings.warn('job setup-time component disabled: setup_time_matrix must be a num_jobs x num_jobs matrix.', RuntimeWarning)
+        if obj_setup and machine_setup_time_matrix is not None and not self.obj_machine_setup:
+            warnings.warn('machine setup-time component disabled: machine_setup_time_matrix must be a num_machines x num_machines matrix.', RuntimeWarning)
         if obj_setup and not self.obj_4:
-            warnings.warn('obj_setup disabled: setup_time_matrix must be a num_jobs x num_jobs matrix.', RuntimeWarning)
+            warnings.warn('obj_setup disabled: provide setup_time_matrix and/or machine_setup_time_matrix with valid dimensions.', RuntimeWarning)
 
         self.objectives_weights = [
             w_obj_makespan if self.obj_1 else 0,
@@ -350,9 +365,13 @@ class load_ga_scheduler:
 
         events = []
         machine_available = [0] * self.num_machines
+        block_group_available = [0] * len(self.machine_block_groups)
         machine_last_job = [None] * self.num_machines
         job_completion = [0] * self.num_jobs
+        job_last_machine = [None] * self.num_jobs
         next_operation = [0] * self.num_jobs
+        maintenance_cursors = [0] * self.num_machines
+        maintenance_last_end = [None] * self.num_machines
         total_setup_time = 0
         total_waste = 0.0
 
@@ -363,25 +382,44 @@ class load_ga_scheduler:
             alternatives = self.flexible_operations[job_id][op_index]
             alt_index = choices[job_id][op_index]
             machine, processing_time = alternatives[alt_index]
-            setup = self._setup_time(machine_last_job[machine], job_id)
-            setup_start = max(machine_available[machine], job_completion[job_id])
-            start = setup_start + setup
+            machine_setup = self._machine_setup_time(job_last_machine[job_id], machine)
+            job_setup = self._setup_time(machine_last_job[machine], job_id)
+
+            projected_setup_start = max(
+                self._resource_ready(machine, machine_available, block_group_available),
+                job_completion[job_id]
+            )
+            self._schedule_due_maintenance(machine, projected_setup_start, events, machine_available,
+                                           block_group_available, maintenance_cursors, maintenance_last_end)
+
+            setup_start = max(
+                self._resource_ready(machine, machine_available, block_group_available),
+                job_completion[job_id]
+            )
+            after_machine_setup = setup_start + machine_setup
+            start = after_machine_setup + job_setup
             end = start + processing_time
-            if setup > 0:
-                events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
-                total_setup_time += setup
+
+            if machine_setup > 0:
+                events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': after_machine_setup, 'kind': 'machine_setup', 'label': f'm{job_last_machine[job_id]}-m{machine}'})
+                total_setup_time += machine_setup
+            if job_setup > 0:
+                events.append({'job': None, 'machine': machine, 'start': after_machine_setup, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
+                total_setup_time += job_setup
                 total_waste += self._setup_waste(machine_last_job[machine], job_id)
             events.append({
                 'job': job_id, 'machine': machine, 'operation': op_index,
                 'alternative': alt_index, 'start': start, 'end': end,
                 'kind': 'job', 'label': f'j{job_id}.o{op_index}@m{machine}'
             })
-            machine_available[machine] = end
+            self._reserve_resource(machine, end, machine_available, block_group_available)
             machine_last_job[machine] = job_id
             job_completion[job_id] = end
+            job_last_machine[job_id] = machine
             next_operation[job_id] += 1
 
-        makespan = max(machine_available) if machine_available else 0
+        makespan = max(machine_available + block_group_available) if (machine_available or block_group_available) else 0
+        maintenance_status = self._build_maintenance_status(makespan, maintenance_cursors, maintenance_last_end)
         total_completion_time = sum(job_completion)
         max_weighted_tardiness = 0.0
         total_late_jobs = 0
@@ -400,6 +438,7 @@ class load_ga_scheduler:
             'total_late_jobs': total_late_jobs,
             'total_setup_time': total_setup_time,
             'total_waste': total_waste,
+            'maintenance_status': maintenance_status,
             'machine_choices': choices,
             'operation_sequence': list(chromosome),
         }
@@ -657,7 +696,8 @@ class load_ga_scheduler:
         return sequences
 
     def _setup_time(self, prev_job, job_id):
-        if prev_job is None or not self.obj_4:
+        """Sequence-dependent job setup time on the same machine."""
+        if prev_job is None or not self.obj_job_setup:
             return 0
         return int(self.setup_time_matrix[prev_job][job_id])
 
@@ -665,6 +705,190 @@ class load_ga_scheduler:
         if prev_job is None or not self.obj_3:
             return 0
         return float(self.setup_waste_matrix[prev_job][job_id])
+
+    def _machine_setup_time(self, prev_machine, machine):
+        """Optional setup/transfer time between consecutive machines of the same job.
+
+        The value is read from machine_setup_time_matrix[prev_machine][machine].
+        It is modeled as a setup interval on the destination machine before the
+        operation starts; therefore it also respects blocking groups.
+        """
+        if prev_machine is None or not self.obj_machine_setup:
+            return 0
+        return int(self.machine_setup_time_matrix[int(prev_machine)][int(machine)])
+
+    def _normalize_machine_block_groups(self, machine_block_groups):
+        """Normalize mutual-exclusion machine groups.
+
+        Example
+        -------
+        machine_block_groups=[[0, 1], [2, 3, 4]] means that machines 0 and 1
+        cannot operate at the same time, and machines 2, 3, and 4 cannot operate
+        at the same time. A machine may belong to more than one group.
+        """
+        groups = []
+        if machine_block_groups is None:
+            return groups, [[] for _ in range(self.num_machines)]
+        for group in machine_block_groups:
+            g = sorted({int(m) for m in group})
+            if len(g) <= 1:
+                continue
+            for m in g:
+                if m < 0 or m >= self.num_machines:
+                    raise ValueError(f'machine_block_groups contains invalid machine {m}; valid range is 0..{self.num_machines - 1}.')
+            groups.append(set(g))
+        machine_to_groups = [[] for _ in range(self.num_machines)]
+        for gid, group in enumerate(groups):
+            for machine in group:
+                machine_to_groups[machine].append(gid)
+        return groups, machine_to_groups
+
+    def _resource_ready(self, machine, machine_available, block_group_available):
+        """Earliest time at which a machine and all its blocking groups are free."""
+        ready = machine_available[machine]
+        for gid in self.machine_to_block_groups[machine]:
+            ready = max(ready, block_group_available[gid])
+        return ready
+
+    def _reserve_resource(self, machine, end, machine_available, block_group_available):
+        """Reserve a machine and its blocking groups until ``end``."""
+        machine_available[machine] = end
+        for gid in self.machine_to_block_groups[machine]:
+            block_group_available[gid] = end
+
+    def _normalize_machine_maintenance(self, machine_maintenance):
+        """Normalize flexible machine-maintenance requirements.
+
+        Accepted form
+        -------------
+        {
+            0: [
+                {'earliest': 0, 'duration': 1, 'label': 'M1 maintenance 1'},
+                {'earliest': 10, 'duration': 1, 'label': 'M1 maintenance 2'}
+            ]
+        }
+
+        Each maintenance is inserted only if the machine has work at or after
+        its earliest feasible time. If all jobs finish before the second
+        maintenance becomes relevant, the event is not drawn but can be reported
+        with ``print_maintenance_report``.
+        """
+        normalized = [[] for _ in range(self.num_machines)]
+        if machine_maintenance is None:
+            return normalized
+        items = machine_maintenance.items() if isinstance(machine_maintenance, dict) else enumerate(machine_maintenance)
+        for machine, requirements in items:
+            machine = int(machine)
+            if machine < 0 or machine >= self.num_machines:
+                raise ValueError(f'machine_maintenance contains invalid machine {machine}; valid range is 0..{self.num_machines - 1}.')
+            if requirements is None:
+                continue
+            for idx, item in enumerate(requirements):
+                if isinstance(item, dict):
+                    duration = item.get('duration', item.get('time', item.get('processing_time', 1)))
+                    if 'end' in item and ('start' in item or 'earliest' in item or 'earliest_start' in item):
+                        base_start = item.get('start', item.get('earliest', item.get('earliest_start', 0)))
+                        duration = float(item['end']) - float(base_start)
+                    earliest = item.get('earliest', item.get('earliest_start', item.get('start', 0)))
+                    min_gap = item.get('min_gap_from_previous', item.get('min_gap', item.get('after', None)))
+                    label = item.get('label', f'maint_m{machine}_{idx + 1}')
+                else:
+                    if len(item) == 2:
+                        earliest, duration = item
+                        label = f'maint_m{machine}_{idx + 1}'
+                        min_gap = None
+                    elif len(item) == 3:
+                        earliest, duration, label = item
+                        min_gap = None
+                    else:
+                        raise ValueError('Maintenance tuple/list must be (earliest, duration) or (earliest, duration, label).')
+                duration = int(duration)
+                earliest = int(earliest)
+                if duration <= 0:
+                    raise ValueError('maintenance duration must be positive.')
+                normalized[machine].append({
+                    'earliest': earliest,
+                    'duration': duration,
+                    'label': str(label),
+                    'min_gap_from_previous': None if min_gap is None else int(min_gap),
+                })
+            normalized[machine].sort(key=lambda x: (x['earliest'], x['label']))
+        return normalized
+
+    def _maintenance_earliest(self, machine, rule, maintenance_last_end):
+        earliest = int(rule.get('earliest', 0))
+        gap = rule.get('min_gap_from_previous')
+        if gap is not None and maintenance_last_end[machine] is not None:
+            earliest = max(earliest, int(maintenance_last_end[machine]) + int(gap))
+        return earliest
+
+    def _schedule_due_maintenance(self, machine, projected_start, events, machine_available,
+                                  block_group_available, maintenance_cursors, maintenance_last_end):
+        """Insert all maintenance events due before the next use of ``machine``."""
+        while maintenance_cursors[machine] < len(self.machine_maintenance[machine]):
+            rule = self.machine_maintenance[machine][maintenance_cursors[machine]]
+            earliest = self._maintenance_earliest(machine, rule, maintenance_last_end)
+            if projected_start < earliest:
+                break
+            start = max(self._resource_ready(machine, machine_available, block_group_available), earliest)
+            end = start + int(rule['duration'])
+            events.append({
+                'job': None, 'machine': machine, 'start': start, 'end': end,
+                'kind': 'maintenance', 'label': rule['label'],
+                'maintenance_index': maintenance_cursors[machine],
+                'earliest': earliest,
+            })
+            self._reserve_resource(machine, end, machine_available, block_group_available)
+            maintenance_last_end[machine] = end
+            maintenance_cursors[machine] += 1
+            projected_start = max(projected_start, end)
+
+    def _build_maintenance_status(self, makespan, maintenance_cursors, maintenance_last_end):
+        status = []
+        for machine, requirements in enumerate(self.machine_maintenance):
+            for idx, rule in enumerate(requirements):
+                earliest = self._maintenance_earliest(machine, rule, maintenance_last_end)
+                if idx < maintenance_cursors[machine]:
+                    state = 'scheduled'
+                elif makespan <= earliest:
+                    state = 'not_required_within_schedule_horizon'
+                else:
+                    state = 'not_scheduled_no_later_machine_use'
+                status.append({
+                    'machine': machine,
+                    'index': idx,
+                    'label': rule['label'],
+                    'earliest': earliest,
+                    'duration': rule['duration'],
+                    'state': state,
+                })
+        return status
+
+    def print_maintenance_report(self, permutation=None):
+        """Print and return a human-readable maintenance report.
+
+        Pass ``permutation`` to report a specific solution. If omitted, the
+        method reports the most recently decoded schedule.
+        """
+        if permutation is not None:
+            decoded = self._decode(permutation)
+            status = decoded.get('maintenance_status', [])
+            makespan = decoded.get('makespan', 0)
+        else:
+            status = list(getattr(self, 'last_maintenance_status', []))
+            makespan = max((e['end'] for e in getattr(self, 'last_events', [])), default=0)
+        if not status:
+            lines = ['No machine maintenance requirements were defined.']
+        else:
+            lines = [f'Maintenance report; schedule horizon/makespan = {int(makespan)}']
+            for item in status:
+                lines.append(
+                    f"Machine {item['machine']} | {item['label']} | earliest={item['earliest']} | "
+                    f"duration={item['duration']} | {item['state']}"
+                )
+        report = '\n'.join(lines)
+        print(report)
+        return lines
 
     def _is_operation_chromosome(self, sequence):
         seq = list(sequence)
@@ -677,9 +901,13 @@ class load_ga_scheduler:
 
         events = []
         machine_available = [0] * self.num_machines
+        block_group_available = [0] * len(self.machine_block_groups)
         machine_last_job = [None] * self.num_machines
         job_completion = [0] * self.num_jobs
+        job_last_machine = [None] * self.num_jobs
         next_operation = [0] * self.num_jobs
+        maintenance_cursors = [0] * self.num_machines
+        maintenance_last_end = [None] * self.num_machines
         total_setup_time = 0
         total_waste = 0.0
 
@@ -689,21 +917,40 @@ class load_ga_scheduler:
                 # Should not happen after validation, but keeps the decoder safe.
                 continue
             machine, processing_time = self.operations[job_id][op_index]
-            setup = self._setup_time(machine_last_job[machine], job_id)
-            setup_start = max(machine_available[machine], job_completion[job_id])
-            start = setup_start + setup
+            machine_setup = self._machine_setup_time(job_last_machine[job_id], machine)
+            job_setup = self._setup_time(machine_last_job[machine], job_id)
+
+            projected_setup_start = max(
+                self._resource_ready(machine, machine_available, block_group_available),
+                job_completion[job_id]
+            )
+            self._schedule_due_maintenance(machine, projected_setup_start, events, machine_available,
+                                           block_group_available, maintenance_cursors, maintenance_last_end)
+
+            setup_start = max(
+                self._resource_ready(machine, machine_available, block_group_available),
+                job_completion[job_id]
+            )
+            after_machine_setup = setup_start + machine_setup
+            start = after_machine_setup + job_setup
             end = start + processing_time
-            if setup > 0:
-                events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
-                total_setup_time += setup
+
+            if machine_setup > 0:
+                events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': after_machine_setup, 'kind': 'machine_setup', 'label': f'm{job_last_machine[job_id]}-m{machine}'})
+                total_setup_time += machine_setup
+            if job_setup > 0:
+                events.append({'job': None, 'machine': machine, 'start': after_machine_setup, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
+                total_setup_time += job_setup
                 total_waste += self._setup_waste(machine_last_job[machine], job_id)
             events.append({'job': job_id, 'machine': machine, 'operation': op_index, 'start': start, 'end': end, 'kind': 'job', 'label': f'j{job_id}.o{op_index}'})
-            machine_available[machine] = end
+            self._reserve_resource(machine, end, machine_available, block_group_available)
             machine_last_job[machine] = job_id
             job_completion[job_id] = end
+            job_last_machine[job_id] = machine
             next_operation[job_id] += 1
 
-        makespan = max(machine_available) if machine_available else 0
+        makespan = max(machine_available + block_group_available) if (machine_available or block_group_available) else 0
+        maintenance_status = self._build_maintenance_status(makespan, maintenance_cursors, maintenance_last_end)
         total_completion_time = sum(job_completion)
         max_weighted_tardiness = 0.0
         total_late_jobs = 0
@@ -722,6 +969,7 @@ class load_ga_scheduler:
             'total_late_jobs': total_late_jobs,
             'total_setup_time': total_setup_time,
             'total_waste': total_waste,
+            'maintenance_status': maintenance_status,
         }
 
     def _decode(self, permutation):
@@ -735,51 +983,107 @@ class load_ga_scheduler:
 
         events = []
         machine_available = [0] * self.num_machines
+        block_group_available = [0] * len(self.machine_block_groups)
         machine_last_job = [None] * self.num_machines
         job_completion = [0] * self.num_jobs
+        job_last_machine = [None] * self.num_jobs
+        maintenance_cursors = [0] * self.num_machines
+        maintenance_last_end = [None] * self.num_machines
         total_setup_time = 0
         total_waste = 0.0
 
         if self.parallel:
-            # Each job is assigned to one alternative machine. Choose minimum completion, not merely minimum start.
+            # Each job is assigned to one alternative machine. Choose minimum completion,
+            # accounting for job setup, blocking groups, and maintenance on each candidate machine.
             for job_id in permutation:
                 best = None
                 for machine, processing_time in self.operations[job_id]:
-                    setup = self._setup_time(machine_last_job[machine], job_id)
-                    start = machine_available[machine] + setup
+                    tmp_machine_available = list(machine_available)
+                    tmp_block_group_available = list(block_group_available)
+                    tmp_maintenance_cursors = list(maintenance_cursors)
+                    tmp_maintenance_last_end = list(maintenance_last_end)
+                    tmp_events = []
+
+                    job_setup = self._setup_time(machine_last_job[machine], job_id)
+                    projected_setup_start = max(
+                        self._resource_ready(machine, tmp_machine_available, tmp_block_group_available),
+                        job_completion[job_id]
+                    )
+                    self._schedule_due_maintenance(machine, projected_setup_start, tmp_events, tmp_machine_available,
+                                                   tmp_block_group_available, tmp_maintenance_cursors,
+                                                   tmp_maintenance_last_end)
+                    setup_start = max(
+                        self._resource_ready(machine, tmp_machine_available, tmp_block_group_available),
+                        job_completion[job_id]
+                    )
+                    start = setup_start + job_setup
                     completion = start + processing_time
-                    candidate = (completion, start, machine, processing_time, setup)
+                    candidate = (completion, start, machine, processing_time, job_setup, setup_start)
                     if best is None or candidate < best:
                         best = candidate
-                completion, start, machine, processing_time, setup = best
-                if setup > 0:
-                    setup_start = machine_available[machine]
+
+                completion, start, machine, processing_time, job_setup, setup_start = best
+
+                projected_setup_start = max(
+                    self._resource_ready(machine, machine_available, block_group_available),
+                    job_completion[job_id]
+                )
+                self._schedule_due_maintenance(machine, projected_setup_start, events, machine_available,
+                                               block_group_available, maintenance_cursors, maintenance_last_end)
+                setup_start = max(
+                    self._resource_ready(machine, machine_available, block_group_available),
+                    job_completion[job_id]
+                )
+                start = setup_start + job_setup
+                completion = start + processing_time
+
+                if job_setup > 0:
                     events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
-                    total_setup_time += setup
+                    total_setup_time += job_setup
                     total_waste += self._setup_waste(machine_last_job[machine], job_id)
                 events.append({'job': job_id, 'machine': machine, 'start': start, 'end': completion, 'kind': 'job', 'label': f'j{job_id}'})
-                machine_available[machine] = completion
+                self._reserve_resource(machine, completion, machine_available, block_group_available)
                 machine_last_job[machine] = job_id
                 job_completion[job_id] = completion
+                job_last_machine[job_id] = machine
         else:
             for job_id in permutation:
                 current_time = job_completion[job_id]
                 for op_index, (machine, processing_time) in enumerate(self.operations[job_id]):
-                    setup = self._setup_time(machine_last_job[machine], job_id)
-                    setup_start = max(machine_available[machine], current_time)
-                    start = setup_start + setup
+                    machine_setup = self._machine_setup_time(job_last_machine[job_id], machine)
+                    job_setup = self._setup_time(machine_last_job[machine], job_id)
+
+                    projected_setup_start = max(
+                        self._resource_ready(machine, machine_available, block_group_available),
+                        current_time
+                    )
+                    self._schedule_due_maintenance(machine, projected_setup_start, events, machine_available,
+                                                   block_group_available, maintenance_cursors, maintenance_last_end)
+
+                    setup_start = max(
+                        self._resource_ready(machine, machine_available, block_group_available),
+                        current_time
+                    )
+                    after_machine_setup = setup_start + machine_setup
+                    start = after_machine_setup + job_setup
                     end = start + processing_time
-                    if setup > 0:
-                        events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
-                        total_setup_time += setup
+
+                    if machine_setup > 0:
+                        events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': after_machine_setup, 'kind': 'machine_setup', 'label': f'm{job_last_machine[job_id]}-m{machine}'})
+                        total_setup_time += machine_setup
+                    if job_setup > 0:
+                        events.append({'job': None, 'machine': machine, 'start': after_machine_setup, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
+                        total_setup_time += job_setup
                         total_waste += self._setup_waste(machine_last_job[machine], job_id)
                     events.append({'job': job_id, 'machine': machine, 'operation': op_index, 'start': start, 'end': end, 'kind': 'job', 'label': f'j{job_id}'})
-                    machine_available[machine] = end
+                    self._reserve_resource(machine, end, machine_available, block_group_available)
                     machine_last_job[machine] = job_id
+                    job_last_machine[job_id] = machine
                     current_time = end
                 job_completion[job_id] = current_time
 
-        makespan = max(machine_available) if machine_available else 0
+        makespan = max(machine_available + block_group_available) if (machine_available or block_group_available) else 0
+        maintenance_status = self._build_maintenance_status(makespan, maintenance_cursors, maintenance_last_end)
         total_completion_time = sum(job_completion)
         max_weighted_tardiness = 0.0
         total_late_jobs = 0
@@ -798,11 +1102,13 @@ class load_ga_scheduler:
             'total_late_jobs': total_late_jobs,
             'total_setup_time': total_setup_time,
             'total_waste': total_waste,
+            'maintenance_status': maintenance_status,
         }
 
     def schedule_jobs(self, permutation):
         decoded = self._decode(permutation)
         self.last_events = decoded['events']
+        self.last_maintenance_status = decoded.get('maintenance_status', [])
         total_length = max(1, int(decoded['makespan']))
         schedule = [['' for _ in range(total_length)] for _ in range(self.num_machines)]
         for event in decoded['events']:
@@ -903,6 +1209,63 @@ class load_ga_scheduler:
                 hovertemplate=(
                     '<b>Setup %{customdata[0]}</b><br>'
                     'Machine: %{y}<br>'
+                    'Start: %{customdata[1]:.0f}<br>'
+                    'End: %{customdata[2]:.0f}<br>'
+                    'Duration: %{customdata[3]:.0f}'
+                    '<extra></extra>'
+                ),
+                width=0.62,
+            ))
+
+        # --- Machine-to-machine setup events --------------------------------
+        machine_setup_events = [e for e in events if e['kind'] == 'machine_setup']
+        if machine_setup_events:
+            fig.add_trace(go.Bar(
+                y=[machine_to_label[e['machine']] for e in machine_setup_events],
+                x=[e['end'] - e['start'] for e in machine_setup_events],
+                base=[e['start'] for e in machine_setup_events],
+                orientation='h',
+                name='Machine setup',
+                legendgroup='machine_setup',
+                marker=dict(
+                    color=_MACHINE_SETUP_FILL,
+                    line=dict(color=_MACHINE_SETUP_LINE, width=1),
+                    pattern=dict(shape='x', fgcolor=_MACHINE_SETUP_LINE, size=6, solidity=0.22),
+                ),
+                customdata=[[e.get('label', ''), e['start'], e['end'], e['end'] - e['start']]
+                            for e in machine_setup_events],
+                hovertemplate=(
+                    '<b>Machine setup %{customdata[0]}</b><br>'
+                    'Machine: %{y}<br>'
+                    'Start: %{customdata[1]:.0f}<br>'
+                    'End: %{customdata[2]:.0f}<br>'
+                    'Duration: %{customdata[3]:.0f}'
+                    '<extra></extra>'
+                ),
+                width=0.62,
+            ))
+
+        # --- Maintenance events ---------------------------------------------
+        maintenance_events = [e for e in events if e['kind'] == 'maintenance']
+        if maintenance_events:
+            fig.add_trace(go.Bar(
+                y=[machine_to_label[e['machine']] for e in maintenance_events],
+                x=[e['end'] - e['start'] for e in maintenance_events],
+                base=[e['start'] for e in maintenance_events],
+                orientation='h',
+                name='Maintenance',
+                legendgroup='maintenance',
+                marker=dict(
+                    color=_MAINTENANCE_FILL,
+                    line=dict(color=_MAINTENANCE_LINE, width=1),
+                    pattern=dict(shape='\\', fgcolor=_MAINTENANCE_LINE, size=6, solidity=0.28),
+                ),
+                customdata=[[e.get('label', ''), e['start'], e['end'], e['end'] - e['start'], e.get('earliest', '')]
+                            for e in maintenance_events],
+                hovertemplate=(
+                    '<b>Maintenance %{customdata[0]}</b><br>'
+                    'Machine: %{y}<br>'
+                    'Earliest: %{customdata[4]}<br>'
                     'Start: %{customdata[1]:.0f}<br>'
                     'End: %{customdata[2]:.0f}<br>'
                     'Duration: %{customdata[3]:.0f}'
