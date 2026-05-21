@@ -12,7 +12,7 @@ Yigit F.; Basilio M.P; Pereira V. (2024). A Hybrid Approach for the Multi-Criter
 
 ## Features
 
-- **Scheduling Machine Environments**: Supports single-machine, parallel-machine, flow shop, flexible flow shop / hybrid flow shop, job shop, flexible job shop, and alternative-machine routing problems problems.
+- **Scheduling Machine Environments**: Supports single-machine, parallel-machine, flow shop, flexible flow shop / hybrid flow shop, job shop, flexible job shop, and alternative-machine routing problems.
 - **Multi-Objective Optimization**: Supports optimization for multiple objectives including makespan, weighted tardiness, sequence-dependent setup time, sequence-dependent setup waste, total completion time, and number of late jobs.
 - **Genetic Algorithm Integration**: Utilizes a GA to efficiently explore the solution space and find optimal or near-optimal job sequences.
 - **Many or Multiobjective Algorithm Integration**: Alternatively, the multiobjective problem can be solved using the NSGA3, which returns the Pareto Front as the solution.
@@ -63,4 +63,4 @@ c) Flexible Sequences (GA = Enabled; NSGA3 = Enabled; Brute Force = Disabled)
 
 - Flexible Flow Shop Machines Scheduling  - ( [ Colab Demo ](https://colab.research.google.com/drive/1WdFqNmNelAp1p97m79m88e5Ozm6qOJGK?usp=sharing)) 
 - Flexible Job Shop Machines Scheduling   - ( [ Colab Demo ](https://colab.research.google.com/drive/1RJLfAxkfGIMX9ct2Md08GIHGuaEx-p59?usp=sharing)) 
-- Alternative-machine Routing Scheduling  - ( [ Colab Demo ](https://colab.research.google.com/drive/1WiAcadhp68-190hCljU9C7fLnUIYqPzN?usp=sharing)) 
+- Alternative-Machine Routing Scheduling  - ( [ Colab Demo ](https://colab.research.google.com/drive/1WiAcadhp68-190hCljU9C7fLnUIYqPzN?usp=sharing)) 
