@@ -6,7 +6,7 @@ long_description = (this_directory / 'README.md').read_text()
 
 setup(
     name='ga_scheduler',
-    version='2.8.1',
+    version='2.8.2',
     license='GNU',
     author='Valdecy Pereira',
     author_email='valdecy.pereira@gmail.com',
@@ -16,7 +16,7 @@ setup(
         'plotly',
         'numpy'
     ],
-    description='A Comprehensive Library for Solving Machine Scheduling Problems Using Genetic Algorithms',
+    description='A Comprehensive Library for Fixed and Flexible Machine Scheduling Using Genetic Algorithms',
     long_description=long_description,
     long_description_content_type='text/markdown',
 )

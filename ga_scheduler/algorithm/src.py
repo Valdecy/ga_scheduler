@@ -2,9 +2,11 @@
 # GA Scheduler - corrected scheduler core
 ############################################################################
 
+import copy
 import itertools
 import math
 import random
+from collections import Counter
 import warnings
 import plotly.graph_objects as go
 import numpy as np
@@ -35,7 +37,7 @@ _FONT_FAMILY = (
 
 class load_ga_scheduler:
     """
-    Permutation-priority scheduler plus optional operation-based full JSSP decoder.
+    Permutation-priority scheduler plus optional operation-based and flexible-machine decoders.
 
     Notes
     -----
@@ -43,9 +45,14 @@ class load_ga_scheduler:
     the chromosome is an operation sequence where each job ID is repeated once
     per operation; the nth occurrence of job j dispatches operation n of job j.
     This supports repeated machine visits and general operation-level JSSP decoding.
+
+    Passing flexible_sequences enables a separate alternative-machine decoder.
+    Its input shape is job -> operation/stage -> [(machine, processing_time), ...].
+    This supports flexible flow shop, hybrid flow shop, flexible job shop, and
+    general alternative-machine routing while preserving the legacy sequences API.
     """
 
-    def __init__(self, sequences=None, due_dates=None, setup_time_matrix=None, setup_waste_matrix=None,
+    def __init__(self, sequences=None, flexible_sequences=None, due_dates=None, setup_time_matrix=None, setup_waste_matrix=None,
                  z_permutations=100, job_weights=None,
                  obj_makespan=True, obj_total_compl_time=True, obj_total_late_jobs=True,
                  obj_max_w_tardiness=True, obj_total_waste=True, obj_setup=True,
@@ -54,18 +61,28 @@ class load_ga_scheduler:
                  parallel_machines=False, brute_force=False, pareto_front=False,
                  custom_sequence=None, operation_based_jssp=False,
                  z_mean=None, z_std=None, z_seed=None):
-        self.sequences = sequences or []
+        self.flexible_operations = self._normalize_flexible_sequences(flexible_sequences) if flexible_sequences is not None else None
+        self.flexible = self.flexible_operations is not None
+
+        if self.flexible:
+            # Keep the legacy ``sequences`` attribute as a fixed first-alternative
+            # projection so older helper methods and diagnostics remain meaningful.
+            self.sequences = self._first_alternative_sequences(self.flexible_operations)
+        else:
+            self.sequences = sequences or []
+
         if not self.sequences:
-            raise ValueError('sequences must be a non-empty list of jobs, where each job is a list of (machine, processing_time) tuples.')
+            raise ValueError('sequences must be non-empty, or provide flexible_sequences as job -> operation/stage -> alternatives.')
 
         self.due_dates = list(due_dates) if due_dates is not None else []
         self.setup_time_matrix = setup_time_matrix if setup_time_matrix is not None else []
         self.setup_waste_matrix = setup_waste_matrix if setup_waste_matrix is not None else []
         self.parallel = bool(parallel_machines)
         self.brute_force = bool(brute_force)
-        self.custom_sequence = list(custom_sequence) if custom_sequence is not None else []
+        self.custom_sequence = copy.deepcopy(custom_sequence) if custom_sequence is not None else None
         self.pareto_front = bool(pareto_front)
-        self.operation_based_jssp = bool(operation_based_jssp)
+        # Flexible-machine problems are operation-dispatch problems by definition.
+        self.operation_based_jssp = True if self.flexible else bool(operation_based_jssp)
         self.z_permutations = int(z_permutations)
 
         # Normalization of the scalarized objective uses random sampling when
@@ -77,7 +94,10 @@ class load_ga_scheduler:
         self.machine_sequences, self.matrix = self.sequence_inputs()
         self.operations = [[(int(m), int(t)) for m, t in job] for job in self.sequences]
         self.num_jobs = len(self.operations)
-        self.num_machines = int(max(m for job in self.operations for m, _ in job) + 1)
+        if self.flexible:
+            self.num_machines = int(max(m for job in self.flexible_operations for op in job for m, _ in op) + 1)
+        else:
+            self.num_machines = int(max(m for job in self.operations for m, _ in job) + 1)
         self.operation_counts = [len(job) for job in self.operations]
         self.operation_chromosome = [job_id for job_id, count in enumerate(self.operation_counts) for _ in range(count)]
 
@@ -138,6 +158,476 @@ class load_ga_scheduler:
             return arr.shape[0] >= n and arr.shape[1] >= n
         except Exception:
             return False
+
+    @staticmethod
+    def _is_machine_time_pair(value):
+        """Return True for a single (machine, processing_time) pair."""
+        if not isinstance(value, (tuple, list)) or len(value) != 2:
+            return False
+        machine, processing_time = value
+        return not isinstance(machine, (tuple, list, dict)) and not isinstance(processing_time, (tuple, list, dict))
+
+    @classmethod
+    def _normalize_flexible_sequences(cls, flexible_sequences):
+        """Normalize flexible-machine input.
+
+        Expected structure
+        ------------------
+        flexible_sequences[job][operation] = [(machine, processing_time), ...]
+
+        A fixed operation written as ``(machine, processing_time)`` is also
+        accepted and converted to a one-alternative operation. This lets the
+        flexible decoder represent single machine, flow shop, job shop,
+        flexible flow shop, hybrid flow shop, flexible job shop, and general
+        alternative-machine routing with one data model.
+        """
+        if flexible_sequences is None:
+            return None
+        normalized = []
+        if not isinstance(flexible_sequences, (list, tuple)) or len(flexible_sequences) == 0:
+            raise ValueError('flexible_sequences must be a non-empty list of jobs.')
+        for job_id, job in enumerate(flexible_sequences):
+            if not isinstance(job, (list, tuple)) or len(job) == 0:
+                raise ValueError(f'Job {job_id} in flexible_sequences must contain at least one operation/stage.')
+            normalized_job = []
+            for op_id, operation in enumerate(job):
+                if cls._is_machine_time_pair(operation):
+                    alternatives = [operation]
+                else:
+                    if not isinstance(operation, (list, tuple)) or len(operation) == 0:
+                        raise ValueError(f'Job {job_id}, operation {op_id} must contain at least one machine alternative.')
+                    alternatives = list(operation)
+                clean_alternatives = []
+                for alt in alternatives:
+                    if not cls._is_machine_time_pair(alt):
+                        raise ValueError(
+                            f'Invalid alternative at job {job_id}, operation {op_id}: expected (machine, processing_time).'
+                        )
+                    machine, processing_time = alt
+                    machine = int(machine)
+                    processing_time = int(processing_time)
+                    if machine < 0:
+                        raise ValueError('Machine ids must be non-negative integers.')
+                    if processing_time < 0:
+                        raise ValueError('Processing times must be non-negative integers.')
+                    clean_alternatives.append((machine, processing_time))
+                normalized_job.append(clean_alternatives)
+            normalized.append(normalized_job)
+        return normalized
+
+    @staticmethod
+    def _first_alternative_sequences(flexible_operations):
+        """Project flexible input into the legacy fixed-machine representation."""
+        return [[operation[0] for operation in job] for job in flexible_operations]
+
+    def _default_machine_choices(self):
+        """Return first-alternative choices for all flexible operations."""
+        if not self.flexible:
+            return []
+        return [[0 for _operation in job] for job in self.flexible_operations]
+
+    def _random_machine_choices(self, rng=None):
+        """Sample one eligible machine alternative per operation."""
+        rng = rng or random
+        return [[rng.randrange(len(operation)) for operation in job] for job in self.flexible_operations]
+
+    def _repair_machine_choices(self, machine_choices=None):
+        """Repair machine-choice genes so every operation selects an eligible alternative."""
+        if not self.flexible:
+            return []
+        if machine_choices is None:
+            machine_choices = self._default_machine_choices()
+        repaired = []
+        for job_id, job in enumerate(self.flexible_operations):
+            given_job = machine_choices[job_id] if job_id < len(machine_choices) and isinstance(machine_choices[job_id], (list, tuple)) else []
+            repaired_job = []
+            for op_id, alternatives in enumerate(job):
+                value = given_job[op_id] if op_id < len(given_job) else 0
+                try:
+                    value = int(value)
+                except Exception:
+                    value = 0
+                if value < 0 or value >= len(alternatives):
+                    value = max(0, min(value, len(alternatives) - 1))
+                repaired_job.append(value)
+            repaired.append(repaired_job)
+        return repaired
+
+    def _repair_operation_sequence(self, sequence):
+        """Repair an operation-dispatch sequence to the required job-id multiset."""
+        required = Counter(self.operation_chromosome)
+        if sequence is None:
+            sequence = []
+        sequence = list(sequence)
+        used = Counter()
+        repaired = []
+        placeholders = []
+        for gene in sequence:
+            try:
+                gene = int(gene)
+            except Exception:
+                gene = None
+            if gene in required and used[gene] < required[gene]:
+                repaired.append(gene)
+                used[gene] += 1
+            else:
+                placeholders.append(len(repaired))
+                repaired.append(None)
+            if len(repaired) >= len(self.operation_chromosome):
+                break
+        missing = []
+        for gene, count in required.items():
+            missing.extend([gene] * (count - used[gene]))
+        random.shuffle(missing)
+        for idx in placeholders:
+            if missing:
+                repaired[idx] = missing.pop()
+        repaired.extend(missing)
+        return repaired[:len(self.operation_chromosome)]
+
+    def _split_flexible_candidate(self, candidate, machine_choices=None):
+        """Extract operation sequence and machine choices from flexible candidates.
+
+        Accepted candidate formats
+        --------------------------
+        dict with keys:
+            ``operation_sequence`` or ``sequence``;
+            ``machine_choices`` or ``machine_assignment`` or ``choices``.
+        tuple/list pair:
+            ``(operation_sequence, machine_choices)``.
+        plain sequence:
+            operation sequence only; first machine alternative is used.
+        """
+        if machine_choices is not None:
+            sequence = candidate
+            choices = machine_choices
+        elif isinstance(candidate, dict):
+            sequence = (candidate.get('operation_sequence') if 'operation_sequence' in candidate
+                        else candidate.get('sequence', candidate.get('chromosome')))
+            choices = (candidate.get('machine_choices') if 'machine_choices' in candidate
+                       else candidate.get('machine_assignment', candidate.get('choices')))
+        elif (isinstance(candidate, (tuple, list)) and len(candidate) == 2
+              and isinstance(candidate[0], (tuple, list))
+              and isinstance(candidate[1], (tuple, list))
+              and not all(isinstance(x, (int, np.integer)) for x in candidate)):
+            sequence, choices = candidate
+        else:
+            sequence = candidate
+            choices = None
+        sequence = self._repair_operation_sequence(sequence)
+        choices = self._repair_machine_choices(choices)
+        return sequence, choices
+
+    def _make_flexible_individual(self, operation_sequence=None, machine_choices=None, rng=None):
+        """Create a valid flexible individual dictionary."""
+        rng = rng or random
+        if operation_sequence is None:
+            base = list(self.operation_chromosome)
+            operation_sequence = rng.sample(base, len(base))
+        operation_sequence = self._repair_operation_sequence(operation_sequence)
+        if machine_choices is None:
+            machine_choices = self._random_machine_choices(rng)
+        machine_choices = self._repair_machine_choices(machine_choices)
+        return {'operation_sequence': list(operation_sequence), 'machine_choices': machine_choices}
+
+    def _flexible_key(self, individual):
+        sequence, choices = self._split_flexible_candidate(individual)
+        flat_choices = tuple(tuple(job) for job in choices)
+        return tuple(sequence), flat_choices
+
+    def _decode_flexible(self, candidate, machine_choices=None):
+        """Decode a flexible-machine operation sequence and assignment.
+
+        This decoder supports flexible flow shop, hybrid flow shop, flexible job
+        shop, and general alternative-machine routing. Precedence is preserved
+        because the nth occurrence of a job dispatches the nth operation of that
+        job. Machine eligibility is preserved because the selected alternative is
+        always chosen from flexible_sequences[job][operation].
+        """
+        chromosome, choices = self._split_flexible_candidate(candidate, machine_choices)
+        if not self._is_operation_chromosome(chromosome):
+            raise ValueError('flexible operation chromosome must contain each job ID repeated exactly as many times as its number of operations.')
+
+        events = []
+        machine_available = [0] * self.num_machines
+        machine_last_job = [None] * self.num_machines
+        job_completion = [0] * self.num_jobs
+        next_operation = [0] * self.num_jobs
+        total_setup_time = 0
+        total_waste = 0.0
+
+        for job_id in chromosome:
+            op_index = next_operation[job_id]
+            if op_index >= len(self.flexible_operations[job_id]):
+                continue
+            alternatives = self.flexible_operations[job_id][op_index]
+            alt_index = choices[job_id][op_index]
+            machine, processing_time = alternatives[alt_index]
+            setup = self._setup_time(machine_last_job[machine], job_id)
+            setup_start = max(machine_available[machine], job_completion[job_id])
+            start = setup_start + setup
+            end = start + processing_time
+            if setup > 0:
+                events.append({'job': None, 'machine': machine, 'start': setup_start, 'end': start, 'kind': 'setup', 'label': f's{machine_last_job[machine]}-{job_id}'})
+                total_setup_time += setup
+                total_waste += self._setup_waste(machine_last_job[machine], job_id)
+            events.append({
+                'job': job_id, 'machine': machine, 'operation': op_index,
+                'alternative': alt_index, 'start': start, 'end': end,
+                'kind': 'job', 'label': f'j{job_id}.o{op_index}@m{machine}'
+            })
+            machine_available[machine] = end
+            machine_last_job[machine] = job_id
+            job_completion[job_id] = end
+            next_operation[job_id] += 1
+
+        makespan = max(machine_available) if machine_available else 0
+        total_completion_time = sum(job_completion)
+        max_weighted_tardiness = 0.0
+        total_late_jobs = 0
+        if self._has_vector(self.due_dates, self.num_jobs):
+            for job_id, completion in enumerate(job_completion):
+                tardiness = max(0, completion - self.due_dates[job_id])
+                max_weighted_tardiness = max(max_weighted_tardiness, self.job_weights[job_id] * tardiness)
+                total_late_jobs += int(completion > self.due_dates[job_id])
+
+        return {
+            'events': events,
+            'completion_times': job_completion,
+            'makespan': makespan,
+            'total_completion_time': total_completion_time,
+            'max_weighted_tardiness': max_weighted_tardiness,
+            'total_late_jobs': total_late_jobs,
+            'total_setup_time': total_setup_time,
+            'total_waste': total_waste,
+            'machine_choices': choices,
+            'operation_sequence': list(chromosome),
+        }
+
+    def _ppx_operation_sequence(self, parent_1, parent_2):
+        """Precedence-preserving crossover for repeated job-id operation sequences."""
+        p1 = list(parent_1)
+        p2 = list(parent_2)
+        required_counts = Counter(self.operation_chromosome)
+        used = Counter()
+        child = []
+        idx1 = idx2 = 0
+        n = len(self.operation_chromosome)
+        while len(child) < n:
+            prefer_first = random.random() < 0.5
+            parents = ((p1, 'p1'), (p2, 'p2')) if prefer_first else ((p2, 'p2'), (p1, 'p1'))
+            chosen = None
+            for parent, name in parents:
+                idx = idx1 if name == 'p1' else idx2
+                while idx < len(parent) and used[parent[idx]] >= required_counts[parent[idx]]:
+                    idx += 1
+                if name == 'p1':
+                    idx1 = idx
+                else:
+                    idx2 = idx
+                if idx < len(parent):
+                    chosen = parent[idx]
+                    if name == 'p1':
+                        idx1 += 1
+                    else:
+                        idx2 += 1
+                    break
+            if chosen is None:
+                remaining = [gene for gene, required in required_counts.items() for _ in range(required - used[gene])]
+                chosen = random.choice(remaining)
+            child.append(chosen)
+            used[chosen] += 1
+        return self._repair_operation_sequence(child)
+
+    def _crossover_machine_choices(self, choices_1, choices_2):
+        child = []
+        for job_id, job in enumerate(self.flexible_operations):
+            child_job = []
+            for op_id, _alternatives in enumerate(job):
+                value = choices_1[job_id][op_id] if random.random() < 0.5 else choices_2[job_id][op_id]
+                child_job.append(value)
+            child.append(child_job)
+        return self._repair_machine_choices(child)
+
+    def _mutate_operation_sequence(self, sequence, mutation_rate):
+        sequence = list(sequence)
+        if len(sequence) < 2 or random.random() > mutation_rate:
+            return sequence
+        operator = random.choice(('swap', 'insert', 'invert'))
+        i, j = sorted(random.sample(range(len(sequence)), 2))
+        if operator == 'swap':
+            sequence[i], sequence[j] = sequence[j], sequence[i]
+        elif operator == 'insert':
+            value = sequence.pop(j)
+            sequence.insert(i, value)
+        else:
+            sequence[i:j + 1] = list(reversed(sequence[i:j + 1]))
+        return self._repair_operation_sequence(sequence)
+
+    def _mutate_machine_choices(self, machine_choices, mutation_rate):
+        machine_choices = self._repair_machine_choices(copy.deepcopy(machine_choices))
+        if random.random() > mutation_rate:
+            return machine_choices
+        mutable = [(j, o) for j, job in enumerate(self.flexible_operations)
+                   for o, alternatives in enumerate(job) if len(alternatives) > 1]
+        if not mutable:
+            return machine_choices
+        job_id, op_id = random.choice(mutable)
+        n_alts = len(self.flexible_operations[job_id][op_id])
+        old_value = machine_choices[job_id][op_id]
+        alternatives = [i for i in range(n_alts) if i != old_value]
+        machine_choices[job_id][op_id] = random.choice(alternatives) if alternatives else old_value
+        return machine_choices
+
+    def _flexible_crossover(self, parent_1, parent_2):
+        seq_1, choices_1 = self._split_flexible_candidate(parent_1)
+        seq_2, choices_2 = self._split_flexible_candidate(parent_2)
+        child_sequence = self._ppx_operation_sequence(seq_1, seq_2)
+        child_choices = self._crossover_machine_choices(choices_1, choices_2)
+        return self._make_flexible_individual(child_sequence, child_choices)
+
+    def _flexible_mutation(self, individual, mutation_rate):
+        seq, choices = self._split_flexible_candidate(individual)
+        seq = self._mutate_operation_sequence(seq, mutation_rate)
+        choices = self._mutate_machine_choices(choices, mutation_rate)
+        return self._make_flexible_individual(seq, choices)
+
+    @staticmethod
+    def _tournament_index_by_cost(population, tournament_size=2):
+        candidates = random.sample(range(len(population)), min(tournament_size, len(population)))
+        return min(candidates, key=lambda idx: population[idx][1])
+
+    def flexible_genetic_algorithm(self, population_size=50, elite=2, mutation_rate=0.10, generations=100, verbose=True):
+        """Scalarized GA for flexible-machine scheduling individuals."""
+        population_size = max(2, int(population_size))
+        elite = max(0, min(int(elite), population_size))
+        population = []
+        seen = set()
+        attempts = 0
+        while len(population) < population_size and attempts < population_size * 50:
+            attempts += 1
+            individual = self._make_flexible_individual()
+            key = self._flexible_key(individual)
+            if key in seen:
+                continue
+            seen.add(key)
+            population.append([individual, self.target_function(individual)])
+        while len(population) < population_size:
+            individual = self._make_flexible_individual()
+            population.append([individual, self.target_function(individual)])
+        population = sorted(population, key=lambda item: item[1])
+        best = copy.deepcopy(population[0])
+        for generation in range(int(generations) + 1):
+            if verbose:
+                print('Generation:', generation)
+            population = sorted(population, key=lambda item: item[1])
+            if population[0][1] < best[1]:
+                best = copy.deepcopy(population[0])
+            offspring = [copy.deepcopy(ind) for ind in population[:elite]]
+            while len(offspring) < population_size:
+                p1 = population[self._tournament_index_by_cost(population)][0]
+                p2 = population[self._tournament_index_by_cost(population)][0]
+                child = self._flexible_crossover(p1, p2)
+                child = self._flexible_mutation(child, mutation_rate)
+                offspring.append([child, self.target_function(child)])
+            population = offspring
+        population = sorted(population, key=lambda item: item[1])
+        if population[0][1] < best[1]:
+            best = copy.deepcopy(population[0])
+        self.best_sequence = best[0]
+        return best[0], best[1]
+
+    @staticmethod
+    def _dominates_objectives(a, b):
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        return np.all(a <= b) and np.any(a < b)
+
+    def _flexible_objective_values(self, individual):
+        return [float(func(individual)) for func in self.lst_func]
+
+    def _flexible_fronts(self, population):
+        n = len(population)
+        domination_count = [0] * n
+        dominated = [[] for _ in range(n)]
+        fronts = [[]]
+        objectives = [ind[1:] for ind in population]
+        for p in range(n):
+            for q in range(n):
+                if p == q:
+                    continue
+                if self._dominates_objectives(objectives[p], objectives[q]):
+                    dominated[p].append(q)
+                elif self._dominates_objectives(objectives[q], objectives[p]):
+                    domination_count[p] += 1
+            if domination_count[p] == 0:
+                fronts[0].append(p)
+        i = 0
+        while fronts[i]:
+            next_front = []
+            for p in fronts[i]:
+                for q in dominated[p]:
+                    domination_count[q] -= 1
+                    if domination_count[q] == 0:
+                        next_front.append(q)
+            i += 1
+            fronts.append(next_front)
+        return [front for front in fronts if front]
+
+    def _flexible_environmental_selection(self, population, target_size):
+        unique = []
+        seen = set()
+        for ind in population:
+            key = self._flexible_key(ind[0])
+            if key not in seen:
+                seen.add(key)
+                unique.append(ind)
+        if len(unique) <= target_size:
+            return unique
+        selected = []
+        fronts = self._flexible_fronts(unique)
+        for front in fronts:
+            front_individuals = [unique[i] for i in front]
+            if len(selected) + len(front_individuals) <= target_size:
+                selected.extend(front_individuals)
+            else:
+                # Simple diversity-preserving truncation: normalize objectives and
+                # prefer lower aggregate normalized score inside the split front.
+                objs = np.asarray([ind[1:] for ind in front_individuals], dtype=float)
+                mins = objs.min(axis=0)
+                ranges = objs.max(axis=0) - mins
+                ranges[ranges == 0] = 1.0
+                scores = ((objs - mins) / ranges).sum(axis=1)
+                order = np.argsort(scores)
+                remaining = target_size - len(selected)
+                selected.extend([front_individuals[i] for i in order[:remaining]])
+                break
+        return selected[:target_size]
+
+    def flexible_pareto_search(self, population_size=50, elite=2, mutation_rate=0.10, generations=100, verbose=True):
+        """Multiobjective evolutionary search for flexible-machine schedules."""
+        if not self.lst_func:
+            raise ValueError('At least one objective must be active for pareto_front=True.')
+        population_size = max(2, int(population_size))
+        population = []
+        while len(population) < population_size:
+            ind = self._make_flexible_individual()
+            population.append([ind] + self._flexible_objective_values(ind))
+        population = self._flexible_environmental_selection(population, population_size)
+        for generation in range(int(generations) + 1):
+            if verbose:
+                print('Generation =', generation)
+            offspring = []
+            scalar_population = [[ind[0], float(np.sum(ind[1:]))] for ind in population]
+            while len(offspring) < population_size:
+                p1 = scalar_population[self._tournament_index_by_cost(scalar_population)][0]
+                p2 = scalar_population[self._tournament_index_by_cost(scalar_population)][0]
+                child = self._flexible_crossover(p1, p2)
+                child = self._flexible_mutation(child, mutation_rate)
+                offspring.append([child] + self._flexible_objective_values(child))
+            population = self._flexible_environmental_selection(population + offspring, population_size)
+        fronts = self._flexible_fronts(population)
+        return [population[i] for i in fronts[0]] if fronts else population
 
     def generate_sequences(self, num_jobs, num_machines, use_all_machines=False, parallel_machines=False,
                            parallel_same_time=False, flow_shop=False, bounds=(1, 10), seed=None):
@@ -235,6 +725,8 @@ class load_ga_scheduler:
         }
 
     def _decode(self, permutation):
+        if self.flexible:
+            return self._decode_flexible(permutation)
         permutation = list(permutation)
         if self.operation_based_jssp or self._is_operation_chromosome(permutation):
             return self._decode_operation_sequence(permutation)
@@ -572,7 +1064,10 @@ class load_ga_scheduler:
 
     def sequence_inputs(self):
         num_jobs = len(self.sequences)
-        num_machines = max(max(machine for machine, _ in job) for job in self.sequences) + 1
+        if self.flexible:
+            num_machines = max(m for job in self.flexible_operations for op in job for m, _ in op) + 1
+        else:
+            num_machines = max(max(machine for machine, _ in job) for job in self.sequences) + 1
         matrix = np.zeros((num_jobs, num_machines), dtype=int)
         seen = [set() for _ in range(num_jobs)]
         for job_id, job in enumerate(self.sequences):
@@ -629,7 +1124,21 @@ class load_ga_scheduler:
                 seen.add(tuple(rng.sample(job_ids, len(job_ids))))
             return list(seen)
 
-        if self.operation_based_jssp:
+        if self.flexible:
+            sampled = []
+            seen = set()
+            target = max(1, self.z_permutations)
+            attempts = 0
+            while len(sampled) < target and attempts < target * 80:
+                attempts += 1
+                candidate = self._make_flexible_individual(rng=rng)
+                key = self._flexible_key(candidate)
+                if key not in seen:
+                    seen.add(key)
+                    sampled.append(candidate)
+            if not sampled:
+                sampled = [self._make_flexible_individual(rng=rng)]
+        elif self.operation_based_jssp:
             base = list(self.operation_chromosome)
             seen = set()
             sampled = []
@@ -697,20 +1206,33 @@ class load_ga_scheduler:
         if self.obj_6: self.lst_func.append(self.calculate_total_late_jobs_p)
 
     def run_ga_scheduler(self, population_size=5, elite=1, mutation_rate=0.10, generations=100, k=4):
-        if not self.custom_sequence and not self.brute_force and not self.pareto_front:
+        has_custom = self.custom_sequence is not None
+        if self.flexible:
+            if self.brute_force:
+                raise ValueError('brute_force=True is not supported for flexible_sequences because machine choices and operation multiset permutations grow very quickly. Use GA or pareto_front=True.')
+            if has_custom:
+                individual = self._make_flexible_individual(*self._split_flexible_candidate(self.custom_sequence))
+                obj_fun = self.target_function(individual)
+                return individual, self.schedule_jobs(individual), obj_fun
+            if self.pareto_front:
+                return self.flexible_pareto_search(population_size=population_size, elite=elite, mutation_rate=mutation_rate, generations=generations, verbose=True)
+            individual, obj_fun = self.flexible_genetic_algorithm(population_size=population_size, elite=elite, mutation_rate=mutation_rate, generations=generations, verbose=True)
+            return individual, self.schedule_jobs(individual), obj_fun
+
+        if not has_custom and not self.brute_force and not self.pareto_front:
             if self.operation_based_jssp:
                 job_sequence, obj_fun = genetic_algorithm_multiset(self.operation_chromosome, population_size, elite, mutation_rate, generations, self.target_function, True)
             else:
                 job_sequence, obj_fun = genetic_algorithm(self.num_jobs, population_size, elite, mutation_rate, generations, self.target_function, True)
             return job_sequence, self.schedule_jobs(job_sequence), obj_fun
-        if not self.custom_sequence and not self.brute_force and self.pareto_front:
+        if not has_custom and not self.brute_force and self.pareto_front:
             if self.operation_based_jssp:
                 return nsga3_algorithm_multiset(population_size=population_size, base_sequence=self.operation_chromosome, list_of_functions=self.lst_func, generations=generations, mutation_rate=mutation_rate, verbose=True)
             return nsga3_algorithm(population_size=population_size, jobs=self.num_jobs, list_of_functions=self.lst_func, generations=generations, mutation_rate=mutation_rate, verbose=True)
-        if not self.custom_sequence and self.brute_force and not self.pareto_front:
+        if not has_custom and self.brute_force and not self.pareto_front:
             job_sequence, obj_fun = self.brute_force_search()
             return job_sequence, self.schedule_jobs(job_sequence), obj_fun
-        if not self.custom_sequence and self.brute_force and self.pareto_front:
+        if not has_custom and self.brute_force and self.pareto_front:
             return self.brute_force_search_p()
         job_sequence = self.custom_sequence
         obj_fun = self.target_function(job_sequence)

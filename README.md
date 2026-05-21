@@ -2,7 +2,9 @@
 
 ## Overview
 
-GA Scheduler is an advanced scheduling tool that leverages genetic algorithms to optimize **single**, **parallel**, **flow shop**, and **job shop** machines scheduling problems. Multiple objectives can be addressed such as makespan, weighted tardiness, total waste changeover between jobs, total setup times changeover between jobs, total completion time and total of late jobs. Additionally, the library provides a comprehensive way to visualize scheduling results through Gantt charts.
+**GA Scheduler** is a Python library for modeling, optimizing, and visualizing machine scheduling problems using genetic algorithms and multiobjective evolutionary optimization. It supports a broad range of scheduling environments, including **single-machine**, **parallel-machine**, **flow shop**, **flexible flow shop / hybrid flow shop**, **job shop**, **flexible job shop**, and **alternative-machine routing problems**. The library can optimize several performance criteria, including **makespan**, **weighted tardiness**, **sequence-dependent setup time**, **sequence-dependent setup waste**, **total completion time**, and **number of late jobs**. It also provides **interactive Gantt chart visualizations** to help users inspect, interpret, and communicate scheduling solutions.
+
+
 
 ##  Citation
 
@@ -10,11 +12,11 @@ Yigit F.; Basilio M.P; Pereira V. (2024). A Hybrid Approach for the Multi-Criter
 
 ## Features
 
-- **Scheduling Machine Environments**: Supports single machine, parallel machines, flow shop, and job shop scheduling problems.
-- **Multi-Objective Optimization**: Supports optimization for multiple objectives including makespan, weighted tardiness, total waste changeover between jobs, setup times changeover between jobs, total completion time and total of late jobs.
+- **Scheduling Machine Environments**: Supports single-machine, parallel-machine, flow shop, flexible flow shop / hybrid flow shop, job shop, flexible job shop, and alternative-machine routing problems problems.
+- **Multi-Objective Optimization**: Supports optimization for multiple objectives including makespan, weighted tardiness, sequence-dependent setup time, sequence-dependent setup waste, total completion time, and number of late jobs.
 - **Genetic Algorithm Integration**: Utilizes a GA to efficiently explore the solution space and find optimal or near-optimal job sequences.
 - **Many or Multiobjective Algorithm Integration**: Alternatively, the multiobjective problem can be solved using the NSGA3, which returns the Pareto Front as the solution.
-- **Brute Force**: For small problem instances, the brute force search can be used to find the optimal job sequence.
+- **Brute Force**: For small problem instances, the brute force search can be used to find the optimal job sequence. It is intentionally disabled for flexible sequences because the search space combines operation-dispatch permutations and machine-choice combinations.
 - **Customizability**: Allows customization of job sequences, setup times, due dates, and more.
 - **Visualization**: Generates Gantt charts to visualize the scheduling of jobs across machines.
 
@@ -56,3 +58,9 @@ b) Multiobjective - Pareto Front
 <!-- -->
 - Job Shop Machines Scheduling  - Brute Force ( [ Colab Demo ](https://colab.research.google.com/drive/13LK2Ckc8XoftJosNQn7f7bNa0U56Zy4p?usp=sharing)) 
 - Job Shop Machines Scheduling  - NSGA3 ( [ Colab Demo ](https://colab.research.google.com/drive/1PYV0afWMVYREwtRQRbNm1u8McDczAb0k?usp=sharing)) 
+
+c) Flexible Sequences (GA = Enabled; NSGA3 = Enabled; Brute Force = Disabled)
+
+- Flexible Flow Shop Machines Scheduling  - ( [ Colab Demo ](https://colab.research.google.com/drive/1WdFqNmNelAp1p97m79m88e5Ozm6qOJGK?usp=sharing)) 
+- Flexible Job Shop Machines Scheduling   - ( [ Colab Demo ](https://colab.research.google.com/drive/1RJLfAxkfGIMX9ct2Md08GIHGuaEx-p59?usp=sharing)) 
+- Alternative-machine Routing Scheduling  - ( [ Colab Demo ](https://colab.research.google.com/drive/1WiAcadhp68-190hCljU9C7fLnUIYqPzN?usp=sharing)) 
