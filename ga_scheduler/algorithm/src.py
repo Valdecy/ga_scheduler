@@ -1205,8 +1205,21 @@ class load_ga_scheduler:
         if self.obj_5: self.lst_func.append(self.calculate_total_completion_time_p)
         if self.obj_6: self.lst_func.append(self.calculate_total_late_jobs_p)
 
+    @staticmethod
+    def _has_custom_solution(custom_sequence):
+        """Return True only when the user supplied a non-empty custom solution.
+
+        Historically, custom_sequence=[] meant "run the optimizer". Keep that
+        behaviour for both legacy fixed-machine and new flexible-machine modes.
+        """
+        if custom_sequence is None:
+            return False
+        if isinstance(custom_sequence, (list, tuple, dict)) and len(custom_sequence) == 0:
+            return False
+        return True
+
     def run_ga_scheduler(self, population_size=5, elite=1, mutation_rate=0.10, generations=100, k=4):
-        has_custom = self.custom_sequence is not None
+        has_custom = self._has_custom_solution(self.custom_sequence)
         if self.flexible:
             if self.brute_force:
                 raise ValueError('brute_force=True is not supported for flexible_sequences because machine choices and operation multiset permutations grow very quickly. Use GA or pareto_front=True.')
